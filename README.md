@@ -80,4 +80,4 @@ For DE-GP
 * Pytorch>=1.4.0
 * theano==1.0.3, pymc3==3.5 (for VI and HMC baselines)
 * jax==0.2.12, jaxlib==0.1.65, neural-tangents==0.3.6 (for NN-GP baseline)
-* genrl (may be)
+* genrl

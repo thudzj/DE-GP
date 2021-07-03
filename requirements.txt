@@ -4,3 +4,4 @@ jax==0.2.12
 jaxlib==0.1.65
 neural-tangents==0.3.6
 pytorch==1.7.1
+genrl
