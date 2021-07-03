@@ -1,10 +1,3 @@
-'''
-CUDA_VISIBLE_DEVICES=5 python dcb.py --run-experiment --download --f_alpha 0.1
-CUDA_VISIBLE_DEVICES=1 python dcb.py --run-experiment --download --bandit adult --f_alpha 0.1
-python dcb.py --run-experiment --download --bandit mushroom
-'''
-
-
 from datetime import datetime
 from pathlib import Path
 
@@ -12,7 +5,6 @@ import matplotlib
 matplotlib.use('agg')
 import matplotlib.pyplot as plt
 plt.rcParams.update({'figure.max_open_warning': 0})
-# plt.rcParams['font.family'] = 'Times New Roman'
 plt.rcParams.update({'font.size': 14})
 
 
@@ -22,29 +14,19 @@ import torch
 import torch.nn as nn
 import seaborn as sns
 
-# from matplotlib.colors import ListedColormap
-# construct cmap
-# flatui = ["#9b59b6", "#3498db", "#95a5a6", "#e74c3c", "#34495e", "#2ecc71"]
-# my_cmap = ListedColormap(sns.color_palette().as_hex())
-
 import genrl
 import genrl.agents
 import genrl.agents.bandits
 import genrl.agents.bandits.contextual
 from genrl.agents.bandits.contextual.base import DCBAgent
 from genrl.agents.bandits.contextual.common import TransitionDB
-# from genrl.agents.bandits.contextual.bootstrap_neural import BootstrapNeuralAgent
 from genrl.agents.bandits.contextual.fixed import FixedAgent
-# from genrl.agents.bandits.contextual.linpos import LinearPosteriorAgent
-# from genrl.agents.bandits.contextual.neural_greedy import NeuralGreedyAgent
-# from genrl.agents.bandits.contextual.neural_linpos import NeuralLinearPosteriorAgent
-# from genrl.agents.bandits.contextual.neural_noise_sampling import NeuralNoiseSamplingAgent
-# from genrl.agents.bandits.contextual.variational import VariationalAgent
 from genrl.bandit.trainer import DCBTrainer
 
 import copy
 
-from utils_degp import init_NN, regularize_on_weight, ParallelPriorLinear, gp_sample_and_estimate_kl, gp_sample
+from utils_degp import init_NN, regularize_on_weight, ParallelPriorLinear, \
+					   gp_sample_and_estimate_kl, gp_sample
 
 
 class Ensemble(nn.Module):
@@ -96,18 +78,19 @@ class Ensemble(nn.Module):
 
 		layers = []
 		for i in range(len(t_hidden_dims) - 2):
-			layers.append(ParallelPriorLinear(self.n_ensembles_prior, t_hidden_dims[i], t_hidden_dims[i + 1]))
+			layers.append(ParallelPriorLinear(self.n_ensembles_prior,
+											  t_hidden_dims[i],
+											  t_hidden_dims[i + 1]))
 			layers.append(nn.ReLU())
-		self.prior_model = nn.Sequential(*layers)
+		self.prior_model = nn.Sequential(*layers).to(self.device)
 
-		# print(self.models[-1], self.prior_model)
 		self.not_trained=True
 		self.data_mean = 0
 		self.data_std = 1
 
 	def forward(self, context, **kwself):
-		output = torch.stack([model(context.to(self.device).sub(self.data_mean).div(self.data_std)) for model in self.models], 0)
-		# print(context.shape, self.models[0](context).shape, output.shape)
+		output = torch.stack([model(context.to(
+			self.device).sub(self.data_mean).div(self.data_std)) for model in self.models], 0)
 		if self.method == 'our' and len(self.models) > 1:
 			output = gp_sample(output, self.epsilon, output.shape[0])
 		output = output[np.random.randint(output.shape[0])].view(-1)
@@ -116,42 +99,26 @@ class Ensemble(nn.Module):
 	def train_model(self, db, epochs: int, batch_size: int):
 		if self.lr_decay is not None and self.lr_reset is True:
 				self._reset_lr(self.init_lr)
-		# self.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, epochs)
 
 		contexts = torch.stack(db.db["contexts"]).to(self.device)
-		# self.data_mean = contexts.mean(0)
-		# self.data_std = contexts.std(0)
 		context_max = contexts.max(0)[0]
 		context_min = contexts.min(0)[0]
 		db_size = len(db.db["contexts"])
-		# print(context_max, context_min)
-
-		# rewards = np.array(db.db["rewards"])
-		# r_mean = rewards.mean()
-		# r_std = rewards.std()
-
-		# losses = []
-		# regs = []
 
 		for _ in range(1000 if self.not_trained else epochs):
 			x, a, y = db.get_data(batch_size)
 			x = x.to(self.device)
 			a = a.to(self.device)
-			y = y.to(self.device)#.sub(r_mean).div(r_std)
+			y = y.to(self.device)
 			action_mask = torch.nn.functional.one_hot(a.view(-1), num_classes=self.n_actions)
 			reward_vec = y.view(-1).repeat(self.n_actions, 1).T * action_mask
-
 			outputs = [model(x.sub(self.data_mean).div(self.data_std)) for model in self.models]
 
-			# print(x.sub(self.data_mean).div(self.data_std + 1e-8).mean(), x.sub(self.data_mean).div(self.data_std + 1e-8).std(), torch.stack(outputs, 0).mean(), torch.stack(outputs, 0).std())
 			if self.method == 'our':
 				ip = None
 				if self.ip:
 					if self.ip == 'uniform':
 						ip = torch.empty_like(x).uniform_(0, 1) * (context_max - context_min) + context_min
-					elif 'kde' in self.ip:
-						kde_intensity = float(self.ip.replace('kde', ''))
-						ip = torch.randn_like(x)*kde_intensity + x
 
 				if ip is not None:
 					ip_outputs = [model(ip.sub(self.data_mean).div(self.data_std)) for model in self.models]
@@ -166,7 +133,6 @@ class Ensemble(nn.Module):
 					y_preds_ref, self.n_sample, self.epsilon, self.W_var, self.b_var)
 				y_pred_samples = y_pred_samples[:, :, :batch_size].permute(0, 2, 1).flatten(0,1)
 
-				# print(a.shape, action_mask.shape, reward_vec.shape)
 				loss = torch.sum(action_mask.repeat(self.n_sample, 1) * (reward_vec.repeat(self.n_sample, 1) - y_pred_samples) ** 2) / batch_size / self.n_sample * self.n_ensemble
 				reg = kl / batch_size * args.n_ensemble
 			else:
@@ -177,17 +143,13 @@ class Ensemble(nn.Module):
 					reg += regularize_on_weight(model, anchor_model, self.method, self.W_var, self.b_var)
 				reg = reg / db_size
 
-			# print(loss, reg)
-
 			self.optimizer.zero_grad()
 			(loss + reg * self.alpha).backward()
 			self.optimizer.step()
 
-			# losses.append(loss.item() / self.n_ensemble)
-			# regs.append(reg.item() / self.n_ensemble)
-
 			if _ % 100 == 99:
-				print("Num_data {}, training loss {:.4f}, reg {:.4f}, lr {:.4f}".format(db_size, loss.item(), reg.item(), self.optimizer.param_groups[0]['lr']))
+				print("Num_data {}, training loss {:.4f}, reg {:.4f}, lr {:.4f}".format(
+					db_size, loss.item(), reg.item(), self.optimizer.param_groups[0]['lr']))
 
 		if self.lr_decay is not None:
 			self.lr_scheduler.step()
@@ -217,7 +179,6 @@ class EnsembleAgent(DCBAgent):
 				hidden_dims=kwargs.get("hidden_dims", None),
 				n_actions=self.n_actions,
 				init_lr=kwargs.get("init_lr", 0.1),
-				# max_grad_norm=kwargs.get("max_grad_norm", 0.5),
 				lr_decay=kwargs.get("lr_decay", 0.5),
 				lr_reset=kwargs.get("lr_reset", False),
 				device=self.device
@@ -253,24 +214,12 @@ class EnsembleAgent(DCBAgent):
 
 
 ALGOS = {
-	# "bootstrap": BootstrapNeuralAgent,
 	"fixed": FixedAgent,
 	"ens": EnsembleAgent,
-	# "linpos": LinearPosteriorAgent,
-	# "neural-greedy": NeuralGreedyAgent,
-	# "neural-linpos": NeuralLinearPosteriorAgent,
-	# "neural-noise": NeuralNoiseSamplingAgent,
-	# "variational": VariationalAgent,
 }
 BANDITS = {
-	"adult": genrl.utils.data_bandits.AdultDataBandit,
-	"census": genrl.utils.data_bandits.CensusDataBandit,
 	"covertype": genrl.utils.data_bandits.CovertypeDataBandit,
-	"magic": genrl.utils.data_bandits.MagicDataBandit,
 	"mushroom": genrl.utils.data_bandits.MushroomDataBandit,
-	"statlog": genrl.utils.data_bandits.StatlogDataBandit,
-	"bernoulli": genrl.bandit.BernoulliMAB,
-	"gaussian": genrl.bandit.GaussianMAB,
 }
 
 
@@ -324,11 +273,6 @@ def run(args, agent, bandit, plot=True):
 def plot_multi_runs(args, multi_results, title):
 	with sns.color_palette():
 		fig = plt.figure(figsize=(12, 4.5), dpi=600)
-		# fig.suptitle(title, fontsize=14)
-		# axs[0, 0].set_title("Cumulative Regret")
-		# axs[0, 1].set_title("Cumulative Reward")
-		# axs[1, 0].set_title("Regret Moving Avg")
-		# axs[1, 1].set_title("Reward Moving Avg")
 		ax = fig.add_subplot(121)
 		ax.tick_params(axis='both', which='major', labelsize=12)
 		ax.tick_params(axis='both', which='minor', labelsize=12)
@@ -348,11 +292,6 @@ def plot_multi_runs(args, multi_results, title):
 			ax.grid(color='lightgray', linestyle='--')
 
 		plt.legend()
-		# ax.legend()
-		# handles, labels = ax.get_legend_handles_labels()
-		# ax.get_legend().remove()
-		# fig.legend(handles, labels, loc='upper center', bbox_to_anchor=(0.5, 1.05), ncol=2, prop={'size':16})
-
 		fig.tight_layout()
 		fig.savefig(Path(args.logdir).joinpath(f"{title}"))
 
@@ -392,25 +331,6 @@ def run_experiment(args):
 
 	bandit_class = BANDITS[args.bandit.lower()]
 	bandit = bandit_class(download=args.download)
-
-	# bootstrap = BootstrapNeuralAgent(bandit=bandit)
-	# logdir = Path(args.logdir).joinpath(
-	#     f"{bootstrap.__class__.__name__}-on-{bandit.__class__.__name__}"
-	# )
-	# bootstrap_trainer = DCBTrainer(
-	#     bootstrap, bandit, logdir=logdir, log_mode=["stdout", "tensorboard"]
-	# )
-	# results["bootstrap"] = bootstrap_trainer.train(
-	#     timesteps=args.timesteps,
-	#     update_interval=50,
-	#     update_after=args.update_after,
-	#     batch_size=args.batch_size,
-	#     train_epochs=100,
-	#     log_every=args.log_every,
-	#     ignore_init=args.ignore_init,
-	#     init_train_epochs=None,
-	#     train_epochs_decay_steps=None,
-	# )
 
 	for method in ['our', 'free', 'reg', 'anc']:
 		args.method = method
@@ -462,84 +382,8 @@ def run_experiment(args):
 	np.save("logs/{}_{}.npy".format(args.bandit, args.seed), results)
 	results = np.load("logs/{}_{}.npy".format(args.bandit, args.seed), allow_pickle=True).item()
 
-	# linpos = LinearPosteriorAgent(bandit)
-	# logdir = Path(args.logdir).joinpath(
-	#     f"{linpos.__class__.__name__}-on-{bandit.__class__.__name__}-{datetime.now():%d%m%y%H%M%S}"
-	# )
-	# linpos_trainer = DCBTrainer(
-	#     linpos, bandit, logdir=logdir, log_mode=["stdout", "tensorboard"]
-	# )
-	# results["linpos"] = linpos_trainer.train(
-	#     timesteps=args.timesteps,
-	#     update_interval=1,
-	#     update_after=args.update_after,
-	#     log_every=args.log_every,
-	#     ignore_init=args.ignore_init,
-	# )
-
-	# neural_linpos = NeuralLinearPosteriorAgent(bandit)
-	# logdir = Path(args.logdir).joinpath(
-	#     f"{neural_linpos.__class__.__name__}-on-{bandit.__class__.__name__}-{datetime.now():%d%m%y%H%M%S}"
-	# )
-	# neural_linpos_trainer = DCBTrainer(
-	#     neural_linpos, bandit, logdir=logdir, log_mode=["stdout", "tensorboard"]
-	# )
-	# results["neural-linpos"] = neural_linpos_trainer.train(
-	#     timesteps=args.timesteps,
-	#     update_interval=50,
-	#     update_after=args.update_after,
-	#     batch_size=args.batch_size,
-	#     train_epochs=100,
-	#     log_every=args.log_every,
-	#     ignore_init=args.ignore_init,
-	#     init_train_epochs=None,
-	#     train_epochs_decay_steps=None,
-	# )
-
-	# neural_noise = NeuralNoiseSamplingAgent(bandit)
-	# logdir = Path(args.logdir).joinpath(
-	#     f"{neural_noise.__class__.__name__}-on-{bandit.__class__.__name__}-{datetime.now():%d%m%y%H%M%S}"
-	# )
-	# neural_noise_trainer = DCBTrainer(
-	#     neural_noise, bandit, logdir=logdir, log_mode=["stdout", "tensorboard"]
-	# )
-	# results["neural-noise"] = neural_noise_trainer.train(
-	#     timesteps=args.timesteps,
-	#     update_interval=50,
-	#     update_after=args.update_after,
-	#     batch_size=args.batch_size,
-	#     train_epochs=100,
-	#     log_every=args.log_every,
-	#     ignore_init=args.ignore_init,
-	#     init_train_epochs=None,
-	#     train_epochs_decay_steps=None,
-	# )
-
-	# variational = VariationalAgent(bandit)
-	# logdir = Path(args.logdir).joinpath(
-	#     f"{variational.__class__.__name__}-on-{bandit.__class__.__name__}-{datetime.now():%d%m%y%H%M%S}"
-	# )
-	# variational_trainer = DCBTrainer(
-	#     variational, bandit, logdir=logdir, log_mode=["stdout", "tensorboard"]
-	# )
-	# results["variational"] = variational_trainer.train(
-	#     timesteps=args.timesteps,
-	#     update_interval=50,
-	#     update_after=args.update_after,
-	#     batch_size=args.batch_size,
-	#     train_epochs=100,
-	#     log_every=args.log_every,
-	#     ignore_init=args.ignore_init,
-	#     init_train_epochs=10000,
-	#     train_epochs_decay_steps=100,
-	# )
-
-	# plot_multi_runs(args, results, title="{}.pdf".format(args.bandit))
-	# print(f"\nCompleted experiment at {(datetime.now() - start_time).seconds}\n")
-
 
 import argparse
-
 def main(args):
 	if args.algo.lower() == "all" and args.bandit.lower() != "all":
 		run_multi_algos(args)
@@ -554,7 +398,6 @@ def main(args):
 if __name__ == "__main__":
 
 	parser = argparse.ArgumentParser(description="Train Deep Contextual Bandits")
-
 	parser.add_argument(
 		"--run-experiment",
 		help="Run pre written experiment with all algos",
@@ -631,7 +474,6 @@ if __name__ == "__main__":
 	)
 
 	parser.add_argument('--method', type=str, default='free')
-	# parser.add_argument('--alpha', type=float, default=1.)
 	parser.add_argument('--ip', type=str, default=None)
 	parser.add_argument('--n_ensembles_prior', type=int, default=64)
 	parser.add_argument('--epsilon', type=float, default=5e-2)
@@ -643,6 +485,8 @@ if __name__ == "__main__":
 	parser.add_argument('--seed', type=int, default=0)
 
 	args = parser.parse_args()
+	if args.bandit == 'covertype':
+		args.f_alpha = 0.1
 
 	np.random.seed(args.seed)
 	torch.manual_seed(args.seed)

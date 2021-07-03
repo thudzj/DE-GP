@@ -115,9 +115,6 @@ def train(args, epoch, models, device, train_loader, tau, optimizer_tau,
 			if args.ip:
 				if args.ip == 'uniform':
 					ip = torch.empty_like(data).uniform_(-1, 1)
-				elif 'kde' in args.ip:
-					kde_intensity = float(args.ip.replace('kde', ''))
-					ip = torch.randn_like(data)*kde_intensity + data
 
 			if ip is not None:
 				for model in models:

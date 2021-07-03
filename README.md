@@ -69,8 +69,15 @@ For DE-GP
     python -u cifar_ws.py --method our --remove_residual --with_w_reg
 ```
 
+### Contextual bandit:
+```bash
+    python contextual_bandit.py --run-experiment --download --bandit covertype
+    python contextual_bandit.py --run-experiment --download --bandit mushroom
+```
+
 ## Requirement
 * Python 3.6+
-* Pytorch==1.7.1
+* Pytorch>=1.4.0
 * theano==1.0.3, pymc3==3.5 (for VI and HMC baselines)
 * jax==0.2.12, jaxlib==0.1.65, neural-tangents==0.3.6 (for NN-GP baseline)
+* genrl (may be)

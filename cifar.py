@@ -315,12 +315,6 @@ def train(args, train_loader, models, prior_model, anchor_models, tau,
 			if args.ip:
 				if args.ip == 'uniform':
 					ip = (torch.empty_like(data).uniform_(0, 1) - data_mean) / data_std
-				elif 'kde' in args.ip:
-					kde_intensity = float(args.ip.replace('kde', ''))
-					with torch.no_grad():
-						ip = data * data_std + data_mean
-						ip.add_(torch.randn_like(data)*kde_intensity).clamp_(0, 1)
-						ip.sub_(data_mean).div_(data_std)
 
 			if ip is not None:
 				for model in models:
