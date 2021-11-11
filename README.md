@@ -69,6 +69,30 @@ For DE-GP
     python -u cifar_ws.py --method our --remove_residual --with_w_reg
 ```
 
+### CIFAR-100 classification (ssh -p 10022 dengzhijie@106.38.203.236):
+For DE
+```bash
+    CUDA_VISIBLE_DEVICES=2 python -u cifar.py --dataset cifar100 --data-root /data1/dengzhijie/cifar --save-dir /data1/dengzhijie/snapshots_degp/ --method free
+    CUDA_VISIBLE_DEVICES=2 python -u cifar.py --dataset cifar100 --data-root /data1/dengzhijie/cifar --save-dir /data1/dengzhijie/snapshots_degp/ --method free --arch resnet56
+```
+For rDE
+```bash
+    CUDA_VISIBLE_DEVICES=3 python -u cifar.py --dataset cifar100 --data-root /data1/dengzhijie/cifar --save-dir /data1/dengzhijie/snapshots_degp/ --method reg
+    CUDA_VISIBLE_DEVICES=3 python -u cifar.py --dataset cifar100 --data-root /data1/dengzhijie/cifar --save-dir /data1/dengzhijie/snapshots_degp/ --method reg --arch resnet56
+```
+For RMS
+```bash
+    CUDA_VISIBLE_DEVICES=4 python -u cifar.py --dataset cifar100 --data-root /data1/dengzhijie/cifar --save-dir /data1/dengzhijie/snapshots_degp/ --method anc --w_alpha 0.01
+    CUDA_VISIBLE_DEVICES=4 python -u cifar.py --dataset cifar100 --data-root /data1/dengzhijie/cifar --save-dir /data1/dengzhijie/snapshots_degp/ --method anc --w_alpha 0.01 --arch resnet56
+```
+For DE-GP
+```bash
+    CUDA_VISIBLE_DEVICES=7 python -u cifar.py --dataset cifar100 --data-root /data1/dengzhijie/cifar --save-dir /data1/dengzhijie/snapshots_degp/ --method our --f_alpha 0.01 --remove_residual --with_w_reg --test-batch-size 100
+    (N_ensemble: 10, Test set: Average loss: 0.8599, Accuracy: 0.7659, ECE: 0.0585)
+    CUDA_VISIBLE_DEVICES=4 python -u cifar.py --dataset cifar100 --data-root /data1/dengzhijie/cifar --save-dir /data1/dengzhijie/snapshots_degp/ --method our --arch resnet56 --f_alpha 0.01 --remove_residual --with_w_reg -b 100 --test-batch-size 100
+    (N_ensemble: 10, Test set: Average loss: 0.7754, Accuracy: 0.7951, ECE: 0.0303)
+```
+
 ### Contextual bandit:
 ```bash
     python contextual_bandit.py --run-experiment --download --bandit covertype

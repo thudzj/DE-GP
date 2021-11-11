@@ -2,7 +2,7 @@ import argparse
 import os
 import shutil
 import time
-
+from functools import partial
 import numpy as np
 
 import torch
@@ -37,6 +37,7 @@ parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
 parser.add_argument('--milestones', default=[100, 150], type=int, nargs='+')
 parser.add_argument('-b', '--batch-size', default=128, type=int,
 					metavar='N', help='mini-batch size (default: 128)')
+parser.add_argument('--test-batch-size', default=1000, type=int)
 parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
 					metavar='LR', help='initial learning rate')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
@@ -48,6 +49,8 @@ parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
 parser.add_argument('--save-dir', dest='save_dir',
 					help='The directory used to save the trained models',
 					default='/data/zhijie/snapshots_degp/', type=str)
+parser.add_argument('--dataset', type=str, default='cifar10')
+parser.add_argument('--data-root', type=str, default='/data/LargeData/Regular/cifar')
 
 parser.add_argument('--n_ensemble', type=int, default=10)
 parser.add_argument('--arch', type=str, default='resnet20')
@@ -77,12 +80,13 @@ def main():
 	global args, best_prec1
 	args = parser.parse_args()
 	args.use_bn = not args.not_use_bn
-	args.token = '{}_{}_ens{}_alpha{}-{}_ip{}_wreg{}_{}{}{}{}'.format(
+	args.token = '{}_{}_ens{}_alpha{}-{}_ip{}_wreg{}_{}{}{}{}{}'.format(
 		args.arch, args.method, args.n_ensemble, args.w_alpha,
 		args.f_alpha, args.ip, args.with_w_reg, args.seed,
 		'_{}'.format(args.prior_arch) if args.prior_arch != args.arch and args.method == 'our' else '',
 		'_rr' if args.remove_residual else '',
-		'_nobn' if not args.use_bn else '')
+		'_nobn' if not args.use_bn else '',
+		'_cifar100' if args.dataset=='cifar100' else '')
 	args.save_dir = os.path.join(args.save_dir, args.token)
 
 	# Check the save_dir exists or not
@@ -93,7 +97,7 @@ def main():
 	torch.manual_seed(args.seed)
 	torch.cuda.manual_seed_all(args.seed)
 
-	model_func = eval(args.arch)
+	model_func = partial(eval(args.arch), num_classes=100 if args.dataset == 'cifar100' else 10)
 	models = []
 	for _ in range(args.n_ensemble):
 		model = model_func(args.use_bn)
@@ -109,8 +113,8 @@ def main():
 	else:
 		prior_model = None
 
-	print(models[-1])
-	print(prior_model)
+	# print(models[-1])
+	# print(prior_model)
 
 	if args.method == 'anc':
 		anchor_models = [model_func(args.use_bn).cuda() for _ in range(args.n_ensemble)]
@@ -163,30 +167,58 @@ def main():
 
 	cudnn.benchmark = True
 
-	normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-									 std=[0.229, 0.224, 0.225])
-	data_mean = torch.tensor([0.485, 0.456, 0.406]).view(1,-1,1,1).cuda()
-	data_std = torch.tensor([0.229, 0.224, 0.225]).view(1,-1,1,1).cuda()
+	if args.dataset == 'cifar10':
+		normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+										 std=[0.229, 0.224, 0.225])
+		data_mean = torch.tensor([0.485, 0.456, 0.406]).view(1,-1,1,1).cuda()
+		data_std = torch.tensor([0.229, 0.224, 0.225]).view(1,-1,1,1).cuda()
 
-	train_loader = torch.utils.data.DataLoader(
-		datasets.CIFAR10(root='/data/LargeData/Regular/cifar', train=True,
-		transform=transforms.Compose([
-			transforms.RandomHorizontalFlip(),
-			transforms.RandomCrop(32, 4),
-			transforms.ToTensor(),
-			normalize,
-		]), download=True),
-		batch_size=args.batch_size, shuffle=True,
-		num_workers=args.workers, pin_memory=True)
+		train_loader = torch.utils.data.DataLoader(
+			datasets.CIFAR10(root=args.data_root, train=True,
+			transform=transforms.Compose([
+				transforms.RandomHorizontalFlip(),
+				transforms.RandomCrop(32, 4),
+				transforms.ToTensor(),
+				normalize,
+			]), download=True),
+			batch_size=args.batch_size, shuffle=True,
+			num_workers=args.workers, pin_memory=True)
 
-	val_loader = torch.utils.data.DataLoader(
-		datasets.CIFAR10(root='/data/LargeData/Regular/cifar', train=False,
-		transform=transforms.Compose([
-			transforms.ToTensor(),
-			normalize,
-		])),
-		batch_size=1000, shuffle=False,
-		num_workers=args.workers, pin_memory=True)
+		val_loader = torch.utils.data.DataLoader(
+			datasets.CIFAR10(root=args.data_root, train=False,
+			transform=transforms.Compose([
+				transforms.ToTensor(),
+				normalize,
+			])),
+			batch_size=args.test_batch_size, shuffle=False,
+			num_workers=args.workers, pin_memory=True)
+	elif args.dataset == 'cifar100':
+		normalize = transforms.Normalize(mean=[x / 255 for x in [129.3, 124.1, 112.4]],
+										 std=[x / 255 for x in [68.2, 65.4, 70.4]])
+		data_mean = torch.tensor([x / 255 for x in [129.3, 124.1, 112.4]]).view(1,-1,1,1).cuda()
+		data_std = torch.tensor([x / 255 for x in [68.2, 65.4, 70.4]]).view(1,-1,1,1).cuda()
+
+		train_loader = torch.utils.data.DataLoader(
+			datasets.CIFAR100(root=args.data_root, train=True,
+			transform=transforms.Compose([
+				transforms.RandomHorizontalFlip(),
+				transforms.RandomCrop(32, 4),
+				transforms.ToTensor(),
+				normalize,
+			]), download=True),
+			batch_size=args.batch_size, shuffle=True,
+			num_workers=args.workers, pin_memory=True)
+
+		val_loader = torch.utils.data.DataLoader(
+			datasets.CIFAR100(root=args.data_root, train=False,
+			transform=transforms.Compose([
+				transforms.ToTensor(),
+				normalize,
+			])),
+			batch_size=args.test_batch_size, shuffle=False,
+			num_workers=args.workers, pin_memory=True)
+	else:
+		raise NotImplementedError
 
 	if args.evaluate:
 		validate(args, val_loader, models, criterion, tau)
@@ -237,26 +269,15 @@ def main():
 		epoch_time.update(time.time() - start_time)
 		start_time = time.time()
 
-	w_norms = np.array(w_norms)
-	np.save('accs/cifar/wnorms_{}.npy'.format(args.token), w_norms)
-
-	acc_wrt_ens = np.zeros((args.n_ensemble, 3))
-	for i in range(1, args.n_ensemble + 1):
-		test_loss, test_acc, test_ece = validate(args, val_loader, models[:i],
-												 criterion, tau, suffix=None)
-		acc_wrt_ens[i-1, 0] = test_loss
-		acc_wrt_ens[i-1, 1] = test_acc
-		acc_wrt_ens[i-1, 2] = test_ece
-	np.save('accs/cifar/acc_wrt_ens_{}.npy'.format(args.token), acc_wrt_ens)
-
 	probs, labels, mis = validate(args, val_loader, models, criterion, tau,
 								  ret_probs_and_labels=True, suffix=None)
-	ood_dataset = datasets.SVHN('/data/LargeData/Regular/svhn', split='test',
+	ood_dataset = datasets.SVHN(args.data_root.replace('cifar', 'svhn'),
+		split='test', download=True,
 		transform=transforms.Compose([
 			transforms.ToTensor(),
 			normalize,
 		]))
-	ood_loader = torch.utils.data.DataLoader(ood_dataset, batch_size=1000,
+	ood_loader = torch.utils.data.DataLoader(ood_dataset, batch_size=args.test_batch_size,
 		num_workers=args.workers, pin_memory=True, shuffle=False)
 	ood_probs, ood_labels, ood_mis = validate(args, ood_loader, models,
 											  criterion, tau,
@@ -277,6 +298,21 @@ def main():
 		else:
 			accs.append(is_correct[mis > th].mean())
 	np.save('accs/cifar/{}.npy'.format(args.token), np.array(accs))
+
+	w_norms = np.array(w_norms)
+	np.save('accs/cifar/wnorms_{}.npy'.format(args.token), w_norms)
+
+	if args.dataset == 'cifar100':
+		return
+
+	acc_wrt_ens = np.zeros((args.n_ensemble, 3))
+	for i in range(1, args.n_ensemble + 1):
+		test_loss, test_acc, test_ece = validate(args, val_loader, models[:i],
+												 criterion, tau, suffix=None)
+		acc_wrt_ens[i-1, 0] = test_loss
+		acc_wrt_ens[i-1, 1] = test_acc
+		acc_wrt_ens[i-1, 2] = test_ece
+	np.save('accs/cifar/acc_wrt_ens_{}.npy'.format(args.token), acc_wrt_ens)
 
 	eval_corrupted_data(args, models, criterion, tau, data_mean, data_std)
 
@@ -450,7 +486,7 @@ def eval_corrupted_data(args, models, criterion, tau, data_mean, data_std):
 			images = (images - data_mean.cpu())/data_std.cpu()
 			corrupted_dataset = torch.utils.data.TensorDataset(images, labels[i*10000:(i+1)*10000])
 			corrupted_loader = torch.utils.data.DataLoader(corrupted_dataset,
-				batch_size=1000, shuffle=False, num_workers=args.workers,
+				batch_size=args.test_batch_size, shuffle=False, num_workers=args.workers,
 				pin_memory=False, sampler=None, drop_last=False)
 			r1, r2, r3 = validate(args, corrupted_loader, models, criterion, tau, suffix=None)
 			results[i, ii] = np.array([r1, r2, r3])
@@ -573,23 +609,23 @@ class ResNet(nn.Module):
 		out = self.linear(out)
 		return out
 
-def resnet20(use_bn):
-	return ResNet(BasicBlock, [3, 3, 3], use_bn=use_bn)
+def resnet20(use_bn, num_classes=10):
+	return ResNet(BasicBlock, [3, 3, 3], use_bn=use_bn, num_classes=num_classes)
 
-def resnet32(use_bn):
-	return ResNet(BasicBlock, [5, 5, 5], use_bn=use_bn)
+def resnet32(use_bn, num_classes=10):
+	return ResNet(BasicBlock, [5, 5, 5], use_bn=use_bn, num_classes=num_classes)
 
-def resnet44(use_bn):
-	return ResNet(BasicBlock, [7, 7, 7], use_bn=use_bn)
+def resnet44(use_bn, num_classes=10):
+	return ResNet(BasicBlock, [7, 7, 7], use_bn=use_bn, num_classes=num_classes)
 
-def resnet56(use_bn):
-	return ResNet(BasicBlock, [9, 9, 9], use_bn=use_bn)
+def resnet56(use_bn, num_classes=10):
+	return ResNet(BasicBlock, [9, 9, 9], use_bn=use_bn, num_classes=num_classes)
 
-def resnet110(use_bn):
-	return ResNet(BasicBlock, [18, 18, 18], use_bn=use_bn)
+def resnet110(use_bn, num_classes=10):
+	return ResNet(BasicBlock, [18, 18, 18], use_bn=use_bn, num_classes=num_classes)
 
-def resnet1202(use_bn):
-	return ResNet(BasicBlock, [200, 200, 200], use_bn=use_bn)
+def resnet1202(use_bn, num_classes=10):
+	return ResNet(BasicBlock, [200, 200, 200], use_bn=use_bn, num_classes=num_classes)
 
 def time_string():
   ISOTIMEFORMAT='%Y-%m-%d %X'
