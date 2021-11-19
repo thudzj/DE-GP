@@ -302,9 +302,6 @@ def main():
 	w_norms = np.array(w_norms)
 	np.save('accs/cifar/wnorms_{}.npy'.format(args.token), w_norms)
 
-	if args.dataset == 'cifar100':
-		return
-
 	acc_wrt_ens = np.zeros((args.n_ensemble, 3))
 	for i in range(1, args.n_ensemble + 1):
 		test_loss, test_acc, test_ece = validate(args, val_loader, models[:i],
@@ -473,13 +470,14 @@ def validate(args, val_loader, models, criterion, tau,
 	return test_loss, top1, ece.item()
 
 def eval_corrupted_data(args, models, criterion, tau, data_mean, data_std):
-	corrupted_data_path = './CIFAR-10-C/CIFAR-10-C'
+	corrupted_data_path = './CIFAR-10-C/CIFAR-10-C' if args.dataset == 'cifar10' else './CIFAR-100-C/CIFAR-100-C'
 	corrupted_data_files = os.listdir(corrupted_data_path)
 	corrupted_data_files.remove('labels.npy')
+	corrupted_data_files.remove('README.txt')
 	results = np.zeros((5, len(corrupted_data_files), 3))
-	labels = torch.from_numpy(np.load(os.path.join(corrupted_data_path, 'labels.npy'))).long()
+	labels = torch.from_numpy(np.load(os.path.join(corrupted_data_path, 'labels.npy'), allow_pickle=True)).long()
 	for ii, corrupted_data_file in enumerate(corrupted_data_files):
-		corrupted_data = np.load(os.path.join(corrupted_data_path, corrupted_data_file))
+		corrupted_data = np.load(os.path.join(corrupted_data_path, corrupted_data_file), allow_pickle=True)
 		for i in range(5):
 			print(corrupted_data_file, i)
 			images = torch.from_numpy(corrupted_data[i*10000:(i+1)*10000]).float().permute(0, 3, 1, 2)/255.
