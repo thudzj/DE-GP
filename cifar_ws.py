@@ -49,6 +49,7 @@ parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
 parser.add_argument('--save-dir', dest='save_dir',
 					help='The directory used to save the trained models',
 					default='/data/zhijie/snapshots_degp/', type=str)
+parser.add_argument('--data-root', type=str, default='/data/LargeData/Regular/cifar')
 
 parser.add_argument('--n_ensemble', type=int, default=10)
 parser.add_argument('--arch', type=str, default='llresnet20')
@@ -57,7 +58,7 @@ parser.add_argument('--b_var', type=float, default=0.01)
 
 parser.add_argument('--method', type=str, default='free')
 parser.add_argument('--w_alpha', type=float, default=0.1)
-parser.add_argument('--f_alpha', type=float, default=0.3)
+parser.add_argument('--f_alpha', type=float, default=0.05)
 parser.add_argument('--ip', type=str, default=None)
 parser.add_argument('--prior_arch', type=str, default='resnet20')
 parser.add_argument('--n_ensembles_prior', type=int, default=10)
@@ -197,7 +198,7 @@ def main():
 	data_std = torch.tensor([0.229, 0.224, 0.225]).view(1,-1,1,1).cuda()
 
 	train_loader = torch.utils.data.DataLoader(
-		datasets.CIFAR10(root='/data/LargeData/Regular/cifar', train=True, transform=transforms.Compose([
+		datasets.CIFAR10(root=args.data_root, train=True, transform=transforms.Compose([
 			transforms.RandomHorizontalFlip(),
 			transforms.RandomCrop(32, 4),
 			transforms.ToTensor(),
@@ -207,7 +208,7 @@ def main():
 		num_workers=args.workers, pin_memory=True)
 
 	val_loader = torch.utils.data.DataLoader(
-		datasets.CIFAR10(root='/data/LargeData/Regular/cifar', train=False, transform=transforms.Compose([
+		datasets.CIFAR10(root=args.data_root, train=False, transform=transforms.Compose([
 			transforms.ToTensor(),
 			normalize,
 		])),
@@ -260,7 +261,7 @@ def main():
 	np.save('accs/cifar/acc_wrt_ens_{}.npy'.format(args.token), acc_wrt_ens)
 
 	probs, labels, mis = validate(args, val_loader, models, criterion, tau, ret_probs_and_labels=True, suffix=None)
-	ood_dataset = datasets.SVHN('/data/LargeData/Regular/svhn', split='test',
+	ood_dataset = datasets.SVHN(args.data_root.replace('cifar', 'svhn'), split='test',
 		transform=transforms.Compose([
 			transforms.ToTensor(),
 			normalize,
