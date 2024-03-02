@@ -27,6 +27,18 @@ For DE-GP
 ```bash
     python fmnist.py --method our
 ```
+For MC dropout
+```bash
+    python fmnist.py --method free --n_ensemble 1 --dropout 0.3 --n_dropout_inf 10
+```
+For snapshot ensemble
+```bash
+    python fmnist.py --method free --n_ensemble 1 --n_snapshots 10 --epochs 4
+```
+For logits-space deep ensemble
+```bash
+    python fmnist.py --method free --logits_mean
+```
 
 ### CIFAR-10 classification:
 For DE
@@ -106,6 +118,18 @@ For DE-GP (beta=0)
         seed 8: N_ensemble: 10, Test set: Average loss: 0.1877, Accuracy: 0.9424, ECE: 0.0099  
         seed 9: N_ensemble: 10, Test set: Average loss: 0.1891, Accuracy: 0.9415, ECE: 0.0105
     python -u cifar.py --method our --n_ensemble 5 --arch resnet110 --f_alpha 0.02 --remove_residual
+```
+For MC dropout
+```bash
+    python -u cifar.py --method reg --n_ensemble 1 --dropout 0.3 --n_dropout_inf 10
+```
+For snapshot ensemble
+```bash
+    python -u cifar.py --method reg --n_ensemble 1 --n_snapshots 10 --epochs 180
+```
+For logits-space deep ensemble
+```bash
+    python -u cifar.py --method reg --logits_mean
 ```
 
 

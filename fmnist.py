@@ -31,7 +31,7 @@ def fn_make_NN(arch, dropout=0., D_in=[1, 28, 28], D_out=10):
 			nn.BatchNorm2d(64),
             nn.ReLU(), nn.MaxPool2d(2),
 			nn.Flatten(1),
-			nn.Linear(64*6*6, 256), nn.ReLU(),
+			nn.Linear(64*6*6, 256), torch.nn.Dropout(dropout), nn.ReLU(),
 			nn.Linear(256, 10)
 		)
 	elif 'mlp' in arch:
@@ -166,25 +166,61 @@ def train(args, epoch, models, device, train_loader, tau, optimizer_tau,
 			print('Train Epoch: {} {}  Acc: {:.4f}  Loss: {:.4f}  Reg: {:.4f}  Tau: {:.4f}'.format(
 				epoch, batch_idx, float(correct) / min(len(train_loader.dataset),
 				(batch_idx+1)*args.batch_size), loss.item(), reg.item(), tau.item()))
+			
+def snapshot_tune(args, epoch, models, device, train_loader, tau, optimizer_tau,
+		  optimizer, scheduler, prior_model=None, anchor_models=None):
+	for model in models: model.train()
+	correct = 0
+
+	for batch_idx, (data, label) in enumerate(train_loader):
+		data, label = data.to(device), label.to(device)
+
+		outputs = [model(data) for model in models]
+		
+		loss = sum([F.cross_entropy(output, label) for output in outputs])
+		reg = 0
+		for model_idx, model in enumerate(models):
+			anchor_model = None if anchor_models is None else anchor_models[model_idx]
+			reg += regularize_on_weight(model, anchor_model, args.method, args.W_var, args.b_var)
+		reg = reg / len(train_loader.dataset)
+
+		for output in outputs:
+			pred = output.argmax(dim=1, keepdim=True)
+			correct += pred.eq(label.view_as(pred)).sum().item()/args.n_ensemble
+
+		optimizer.zero_grad()
+		optimizer_tau.zero_grad()
+		(loss + reg * args.alpha).backward()
+		optimizer.step()
+		optimizer_tau.step()
+		if batch_idx % args.log_interval == 0:
+			print('Train Epoch: {} {}  Acc: {:.4f}  Loss: {:.4f}  Reg: {:.4f}  Tau: {:.4f}  lr: {:.4f}'.format(
+				epoch, batch_idx, float(correct) / min(len(train_loader.dataset),
+				(batch_idx+1)*args.batch_size), loss.item(), reg.item(), tau.item(), optimizer.param_groups[0]['lr']))
+		scheduler.step()
 
 def test(args, models, device, test_loader, tau, ret_probs_and_labels=False):
 	for model in models:
 		model.eval()
-		if args.dropout > 0 and args.n_dropout_inf > 1:
-			model.train()
+		if args.dropout > 0:
+			for module_name, module in model.named_modules():
+				if isinstance(module, (torch.nn.Dropout)):
+					module.train()
 	test_loss = 0
 	correct = 0
 	probs, labels, mis = [], [], []
 	with torch.no_grad():
 		for data, target in test_loader:
 			data, target = data.to(device), target.to(device)
-			output = torch.stack([model(data) for model, _ in
-				itertools.product(models, range(args.n_dropout_inf))], 0)
+			output = torch.stack([model(data) for model in models], 0)
 
 			if args.method == 'our' and len(models) > 1:
 				output = gp_sample(output, args.epsilon, 1000).div(tau)
 			mis.append(ent(output.softmax(-1).mean(0)) - ent(output.softmax(-1)).mean(0))
-			output = output.softmax(-1).mean(0).log()
+			if args.logits_mean:
+				output = output.mean(0)
+			else:
+				output = output.softmax(-1).mean(0).log()
 			test_loss += F.cross_entropy(output, target, reduction='sum').item()  # sum up batch loss
 			pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
 			correct += pred.eq(target.view_as(pred)).sum().item()
@@ -223,13 +259,31 @@ def fit(args, models, device, train_loader, test_loader, tau, prior_model=None,
 	optimizer = optim.SGD(params, lr=args.lr)
 	optimizer_tau = optim.Adam([tau], lr=args.tau_lr)
 	scheduler = CosineAnnealingLR(optimizer, args.epochs)
+	
 	for epoch in range(1, args.epochs + 1):
 		train(args, epoch, models, device, train_loader, tau, optimizer_tau,
 			  optimizer, prior_model, anchor_models)
-		test(args, models, device, test_loader, tau)
+		test(args, models * (args.n_dropout_inf if args.dropout > 0 else 1), device, test_loader, tau)
 		scheduler.step()
+	
+	all_models = []
+	if args.n_snapshots > 1:
+		turn_epochs = 2
+		for turn in range(args.n_snapshots):
+			for g in optimizer.param_groups:
+				g['lr'] = 0.1
+			scheduler = CosineAnnealingLR(optimizer, turn_epochs * len(train_loader))
+			for epoch in range(args.epochs + 1 + turn * turn_epochs, args.epochs + 1+ turn * turn_epochs + turn_epochs):
+				snapshot_tune(args, epoch, models, device, train_loader, tau, optimizer_tau,
+				optimizer, scheduler, prior_model, anchor_models)
+			all_models.append(copy.deepcopy(models[0]))
+			if len(all_models) > args.n_snapshots:
+				all_models = all_models[1:]
+
 	if args.save_model:
 		torch.save(model.state_dict(), "mnist.pt")
+
+	return all_models
 
 def main():
 	# Training settings
@@ -254,10 +308,13 @@ def main():
 	parser.add_argument('--dataset', type=str, default='fmnist')
 	parser.add_argument('--n_ensemble', type=int, default=10)
 	parser.add_argument('--n_dropout_inf', type=int, default=1)
+	parser.add_argument('--n_snapshots', type=int, default=1)
 	parser.add_argument('--arch', type=str, default='fashionCNN')
 	parser.add_argument('--dropout', type=float, default=0.)
 	parser.add_argument('--W_var', type=float, default=2.)
 	parser.add_argument('--b_var', type=float, default=0.01)
+
+	parser.add_argument('--logits_mean', action='store_true', default=False)
 
 	parser.add_argument('--method', type=str, default='free')
 	parser.add_argument('--alpha', type=float, default=0.1)
@@ -313,26 +370,36 @@ def main():
 	print(models[-1])
 	print(prior_model)
 
-	fit(args, models, device, train_loader, test_loader, tau, prior_model, anchor_models)
+	all_models = fit(args, models, device, train_loader, test_loader, tau, prior_model, anchor_models)
+	if args.n_snapshots > 1:
+		models = all_models
 
-	acc_wrt_ens = np.zeros((args.n_ensemble, 2))
-	for i in range(1, args.n_ensemble + 1):
-		test_loss, test_acc = test(args, models[:i], device, test_loader, tau)
+	acc_wrt_ens = np.zeros((args.n_ensemble * args.n_dropout_inf * args.n_snapshots, 2))
+	for i in range(1, args.n_ensemble * args.n_dropout_inf * args.n_snapshots + 1):
+		test_loss, test_acc = test(args, models * i if args.dropout > 0 else models[:i], 
+							 device, test_loader, tau)
 		acc_wrt_ens[i-1, 0] = test_loss
 		acc_wrt_ens[i-1, 1] = test_acc
-	np.save('accs/acc_wrt_ens_{}_{}_{}_ens{}_alpha{}_ip{}_{}{}.npy'.format(
+	print(','.join(['{}'.format(int(item)) for item in list(acc_wrt_ens[1:, 1] * 100)]))
+	print(','.join(['{:.4f}'.format(item) for item in list(acc_wrt_ens[1:, 0])]))
+	np.save('accs/acc_wrt_ens_{}_{}_{}_ens{}_alpha{}_ip{}_{}{}{}{}{}.npy'.format(
 			args.arch, args.dataset, args.method, args.n_ensemble, args.alpha, args.ip, args.seed,
-			'_{}'.format(args.prior_arch) if args.prior_arch != args.arch and args.method == 'our' else ''),
+			'_{}'.format(args.prior_arch) if args.prior_arch != args.arch and args.method == 'our' else '',
+			'_dp{}_{}'.format(args.dropout, args.n_dropout_inf) if args.dropout > 0 else '',
+			'_ss{}'.format(args.n_snapshots) if args.n_snapshots > 1 else '',
+			'_logitsm' if args.logits_mean else ''),
 		acc_wrt_ens)
 
-	probs, labels, mis = test(args, models, device, test_loader, tau, ret_probs_and_labels=True)
+	probs, labels, mis = test(args, models * (args.n_dropout_inf if args.dropout > 0 else 1), 
+						   device, test_loader, tau, ret_probs_and_labels=True)
 	if args.dataset == 'fmnist':
-		ood_dataset = datasets.MNIST(args.data_path, train=False, transform=transform)
+		ood_dataset = datasets.MNIST(args.data_path, train=False, transform=transform, download=True)
 	else:
 		ood_dataset = datasets.FashionMNIST(args.data_path, train=False, transform=transform)
 	ood_loader = torch.utils.data.DataLoader(ood_dataset, batch_size=args.test_batch_size,
 		num_workers=1, pin_memory=True, shuffle=False)
-	ood_probs, ood_labels, ood_mis = test(args, models, device, ood_loader, tau, ret_probs_and_labels=True)
+	ood_probs, ood_labels, ood_mis = test(args, models * (args.n_dropout_inf if args.dropout > 0 else 1), 
+									   device, ood_loader, tau, ret_probs_and_labels=True)
 
 	is_correct = np.concatenate([(probs.argmax(1) == labels).astype(np.float32), np.zeros((ood_labels.shape[0]))])
 	mis = np.concatenate([mis, ood_mis])
@@ -345,9 +412,12 @@ def main():
 			accs.append(accs[-1])
 		else:
 			accs.append(is_correct[mis > th].mean())
-	np.save('accs/{}_{}_{}_ens{}_alpha{}_ip{}_{}{}.npy'.format(
+	np.save('accs/{}_{}_{}_ens{}_alpha{}_ip{}_{}{}{}{}{}.npy'.format(
 			args.arch, args.dataset, args.method, args.n_ensemble, args.alpha, args.ip, args.seed,
-			'_{}'.format(args.prior_arch) if args.prior_arch != args.arch and args.method == 'our' else ''),
+			'_{}'.format(args.prior_arch) if args.prior_arch != args.arch and args.method == 'our' else '',
+			'_dp{}_{}'.format(args.dropout, args.n_dropout_inf) if args.dropout > 0 else '',
+			'_ss{}'.format(args.n_snapshots) if args.n_snapshots > 1 else '',
+			'_logitsm' if args.logits_mean else ''),
 		np.array(accs))
 
 if __name__ == '__main__':

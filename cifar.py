@@ -1,5 +1,5 @@
 import argparse
-import os
+import os, copy
 import shutil
 import time
 from functools import partial
@@ -17,6 +17,7 @@ import torch.optim
 import torch.utils.data
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
+from torch.optim.lr_scheduler import StepLR, CosineAnnealingLR
 
 from timm.utils import AverageMeter
 
@@ -57,6 +58,10 @@ parser.add_argument('--arch', type=str, default='resnet20')
 parser.add_argument('--W_var', type=float, default=2.)
 parser.add_argument('--b_var', type=float, default=0.01)
 
+parser.add_argument('--n_dropout_inf', type=int, default=1)
+parser.add_argument('--n_snapshots', type=int, default=1)
+parser.add_argument('--dropout', type=float, default=0.)
+
 parser.add_argument('--method', type=str, default='free')
 parser.add_argument('--w_alpha', type=float, default=0.1)
 parser.add_argument('--f_alpha', type=float, default=1.)
@@ -72,6 +77,7 @@ parser.add_argument('--lr_warmup', type=int, default=5)
 parser.add_argument('--tau_init', type=float, default=0.1)
 parser.add_argument('--not_use_bn', action='store_true', default=False)
 parser.add_argument('--diag_only', action='store_true', default=False)
+parser.add_argument('--logits_mean', action='store_true', default=False)
 
 best_prec1 = 0
 
@@ -80,13 +86,16 @@ def main():
 	global args, best_prec1
 	args = parser.parse_args()
 	args.use_bn = not args.not_use_bn
-	args.token = '{}_{}_ens{}_alpha{}-{}_ip{}_wreg{}_{}{}{}{}{}'.format(
+	args.token = '{}_{}_ens{}_alpha{}-{}_ip{}_wreg{}_{}{}{}{}{}{}{}{}'.format(
 		args.arch, args.method, args.n_ensemble, args.w_alpha,
 		args.f_alpha, args.ip, args.with_w_reg, args.seed,
 		'_{}'.format(args.prior_arch) if args.prior_arch != args.arch and args.method == 'our' else '',
 		'_rr' if args.remove_residual else '',
 		'_nobn' if not args.use_bn else '',
-		'_cifar100' if args.dataset=='cifar100' else '')
+		'_cifar100' if args.dataset=='cifar100' else '',
+		'_dp{}_{}'.format(args.dropout, args.n_dropout_inf) if args.dropout > 0 else '',
+		'_ss{}'.format(args.n_snapshots) if args.n_snapshots > 1 else '',
+		'_logitsm' if args.logits_mean else '')
 	args.save_dir = os.path.join(args.save_dir, args.token)
 
 	# Check the save_dir exists or not
@@ -100,7 +109,7 @@ def main():
 	model_func = partial(eval(args.arch), num_classes=100 if args.dataset == 'cifar100' else 10)
 	models = []
 	for _ in range(args.n_ensemble):
-		model = model_func(args.use_bn)
+		model = model_func(args.use_bn, args.dropout)
 		if args.method == 'our':
 			model = convert_archcond(model, None, False)
 		model.cuda()
@@ -221,7 +230,7 @@ def main():
 		raise NotImplementedError
 
 	if args.evaluate:
-		validate(args, val_loader, models, criterion, tau)
+		validate(args, val_loader, models * (args.n_dropout_inf if args.dropout > 0 else 1), criterion, tau)
 		eval_corrupted_data(args, models, criterion, tau, data_mean, data_std)
 		return
 
@@ -229,6 +238,7 @@ def main():
 	epoch_time = AverageMeter()
 
 	w_norms = []
+	all_models = []
 	for epoch in range(args.start_epoch, args.epochs):
 
 		need_hour, need_mins, need_secs = convert_secs2time(epoch_time.avg * (args.epochs-epoch))
@@ -252,7 +262,7 @@ def main():
 			w_norms.append(tmp)
 
 		# evaluate on validation set
-		_, prec1, _ = validate(args, val_loader, models, criterion, tau)
+		_, prec1, _ = validate(args, val_loader, models * (args.n_dropout_inf if args.dropout > 0 else 1), criterion, tau)
 
 		# remember best prec@1 and save checkpoint
 		best_prec1 = max(prec1, best_prec1)
@@ -269,7 +279,23 @@ def main():
 		epoch_time.update(time.time() - start_time)
 		start_time = time.time()
 
-	probs, labels, mis = validate(args, val_loader, models, criterion, tau,
+	all_models = []
+	if args.n_snapshots > 1:
+		turn_epochs = 2
+		for turn in range(args.n_snapshots):
+			for g in optimizer.param_groups:
+				g['lr'] = 0.005
+			scheduler = CosineAnnealingLR(optimizer, turn_epochs * len(train_loader))
+			for epoch in range(args.epochs + turn * turn_epochs, args.epochs+ turn * turn_epochs + turn_epochs):
+				snapshot_tune(args, train_loader, models, prior_model, anchor_models, tau,
+			  		criterion, optimizer, optimizer_tau, epoch, scheduler, data_mean, data_std)
+			all_models.append(copy.deepcopy(models[0]))
+			if len(all_models) > args.n_snapshots:
+				all_models = all_models[1:]
+
+		models = all_models
+
+	probs, labels, mis = validate(args, val_loader, models * (args.n_dropout_inf if args.dropout > 0 else 1), criterion, tau,
 								  ret_probs_and_labels=True, suffix=None)
 	ood_dataset = datasets.SVHN(args.data_root.replace('cifar', 'svhn'),
 		split='test', download=True,
@@ -279,7 +305,7 @@ def main():
 		]))
 	ood_loader = torch.utils.data.DataLoader(ood_dataset, batch_size=args.test_batch_size,
 		num_workers=args.workers, pin_memory=True, shuffle=False)
-	ood_probs, ood_labels, ood_mis = validate(args, ood_loader, models,
+	ood_probs, ood_labels, ood_mis = validate(args, ood_loader, models * (args.n_dropout_inf if args.dropout > 0 else 1),
 											  criterion, tau,
 											  ret_probs_and_labels=True,
 											  suffix=None)
@@ -302,16 +328,16 @@ def main():
 	w_norms = np.array(w_norms)
 	np.save('accs/cifar/wnorms_{}.npy'.format(args.token), w_norms)
 
-	acc_wrt_ens = np.zeros((args.n_ensemble, 3))
-	for i in range(1, args.n_ensemble + 1):
-		test_loss, test_acc, test_ece = validate(args, val_loader, models[:i],
+	acc_wrt_ens = np.zeros((args.n_ensemble * args.n_dropout_inf * args.n_snapshots, 3))
+	for i in range(1, args.n_ensemble * args.n_dropout_inf * args.n_snapshots + 1):
+		test_loss, test_acc, test_ece = validate(args, val_loader, models * i if args.dropout > 0 else models[:i],
 												 criterion, tau, suffix=None)
 		acc_wrt_ens[i-1, 0] = test_loss
 		acc_wrt_ens[i-1, 1] = test_acc
 		acc_wrt_ens[i-1, 2] = test_ece
 	np.save('accs/cifar/acc_wrt_ens_{}.npy'.format(args.token), acc_wrt_ens)
 
-	eval_corrupted_data(args, models, criterion, tau, data_mean, data_std)
+	eval_corrupted_data(args, models * (args.n_dropout_inf if args.dropout > 0 else 1), criterion, tau, data_mean, data_std)
 
 def train(args, train_loader, models, prior_model, anchor_models, tau,
 		  criterion, optimizer, optimizer_tau, epoch, data_mean, data_std):
@@ -428,10 +454,86 @@ def train(args, train_loader, models, prior_model, anchor_models, tau,
 			  tau=tau.item(), top1=top1))
 
 
+def snapshot_tune(args, train_loader, models, prior_model, anchor_models, tau,
+		  criterion, optimizer, optimizer_tau, epoch, scheduler, data_mean, data_std):
+	batch_time = AverageMeter()
+	data_time = AverageMeter()
+	losses = AverageMeter()
+	f_regs = AverageMeter()
+	w_regs = AverageMeter()
+	top1 = AverageMeter()
+
+	# switch to train mode
+	for model in models: model.train()
+
+	end = time.time()
+	for i, (data, label) in enumerate(train_loader):
+		# measure data loading time
+		data_time.update(time.time() - end)
+
+		if epoch < args.lr_warmup:
+			for param_group in optimizer.param_groups:
+				param_group['lr'] = args.lr * float(i + epoch*len(train_loader)) \
+									/(args.lr_warmup*len(train_loader))
+
+		data = data.cuda(non_blocking=True)
+		label = label.cuda(non_blocking=True)
+
+		# compute output
+		outputs = [model(data) for model in models]
+		
+		loss = sum([criterion(output, label) for output in outputs])
+		f_reg = torch.tensor(0.).cuda()
+		w_reg = 0
+		for model_idx, model in enumerate(models):
+			anchor_model = None if anchor_models is None else anchor_models[model_idx]
+			w_reg += regularize_on_weight(model, anchor_model, args.method,
+											args.W_var, args.b_var)
+		w_reg = w_reg / len(train_loader.dataset)
+
+		correct = 0
+		for output in outputs:
+			pred = output.argmax(dim=1, keepdim=True)
+			correct += pred.eq(label.view_as(pred)).sum().item()/float(args.n_ensemble)
+
+		optimizer.zero_grad()
+		optimizer_tau.zero_grad()
+		(loss + f_reg * args.f_alpha + w_reg * args.w_alpha).backward()
+		optimizer.step()
+		optimizer_tau.step()
+		scheduler.step()
+
+		# record loss
+		losses.update(loss.item()/args.n_ensemble, label.size(0))
+		f_regs.update(f_reg.item()/args.n_ensemble, 1)
+		w_regs.update(w_reg.item()/args.n_ensemble, 1)
+		top1.update(correct/label.size(0), label.size(0))
+
+		# measure elapsed time
+		batch_time.update(time.time() - end)
+		end = time.time()
+
+	print('\tLr: {lr:.4f}, '
+		  'Time {batch_time.avg:.3f}, '
+		  'Data {data_time.avg:.3f}, '
+		  'Loss {loss.avg:.4f}, '
+		  'F Reg {f_reg.avg:.4f}, '
+		  'W Reg {w_reg.avg:.4f}, '
+		  'Tau {tau:.4f}, '
+		  'Prec@1 {top1.avg:.4f}'.format(
+			  lr=optimizer.param_groups[0]['lr'], batch_time=batch_time,
+			  data_time=data_time, loss=losses, f_reg=f_regs, w_reg=w_regs,
+			  tau=tau.item(), top1=top1))
+
 def validate(args, val_loader, models, criterion, tau,
 			 ret_probs_and_labels=False, suffix=''):
 	# switch to evaluate mode
-	for model in models: model.eval()
+	for model in models: 
+		model.eval()
+		if args.dropout > 0:
+			for module_name, module in model.named_modules():
+				if isinstance(module, (torch.nn.Dropout)):
+					module.train()
 
 	test_loss, correct = 0, 0
 	probs, labels, mis = [], [], []
@@ -445,7 +547,10 @@ def validate(args, val_loader, models, criterion, tau,
 			if args.method == 'our' and len(models) > 1:
 				output = gp_sample(output, args.epsilon, 1000, args.diag_only).div(tau)
 			mis.append(ent(output.softmax(-1).mean(0)) - ent(output.softmax(-1)).mean(0))
-			output = output.softmax(-1).mean(0).log()
+			if args.logits_mean:
+				output = output.mean(0)
+			else:
+				output = output.softmax(-1).mean(0).log()
 			test_loss += criterion(output, target).item() * target.size(0)  # sum up batch loss
 			pred = output.argmax(dim=1, keepdim=True)  # get the index of the max log-probability
 			correct += pred.eq(target.view_as(pred)).sum().item()
@@ -470,10 +575,12 @@ def validate(args, val_loader, models, criterion, tau,
 	return test_loss, top1, ece.item()
 
 def eval_corrupted_data(args, models, criterion, tau, data_mean, data_std):
-	corrupted_data_path = './CIFAR-10-C/CIFAR-10-C' if args.dataset == 'cifar10' else './CIFAR-100-C/CIFAR-100-C'
+	corrupted_data_path = '../CIFAR-10-C/CIFAR-10-C' if args.dataset == 'cifar10' else './CIFAR-100-C/CIFAR-100-C'
 	corrupted_data_files = os.listdir(corrupted_data_path)
-	corrupted_data_files.remove('labels.npy')
-	corrupted_data_files.remove('README.txt')
+	if 'labels.npy' in corrupted_data_files:
+		corrupted_data_files.remove('labels.npy')
+	if 'README.txt' in corrupted_data_files:
+		corrupted_data_files.remove('README.txt')
 	results = np.zeros((5, len(corrupted_data_files), 3))
 	labels = torch.from_numpy(np.load(os.path.join(corrupted_data_path, 'labels.npy'), allow_pickle=True)).long()
 	for ii, corrupted_data_file in enumerate(corrupted_data_files):
@@ -578,7 +685,7 @@ class BasicBlock(nn.Module):
 		return out
 
 class ResNet(nn.Module):
-	def __init__(self, block, num_blocks, num_classes=10, use_bn=True):
+	def __init__(self, block, num_blocks, dropout=0, num_classes=10, use_bn=True):
 		super(ResNet, self).__init__()
 		self.in_planes = 16
 
@@ -589,6 +696,7 @@ class ResNet(nn.Module):
 		self.layer2 = self._make_layer(block, 32, num_blocks[1], use_bn, norm_fn, stride=2)
 		self.layer3 = self._make_layer(block, 64, num_blocks[2], use_bn, norm_fn, stride=2)
 		self.linear = nn.Linear(64, num_classes)
+		self.dropout = torch.nn.Dropout(dropout)
 
 	def _make_layer(self, block, planes, num_blocks, use_bn, norm_fn, stride):
 		strides = [stride] + [1]*(num_blocks-1)
@@ -604,26 +712,27 @@ class ResNet(nn.Module):
 		out = self.layer2(out)
 		out = self.layer3(out)
 		out = out.mean([-2, -1])
+		out = self.dropout(out)
 		out = self.linear(out)
 		return out
 
-def resnet20(use_bn, num_classes=10):
-	return ResNet(BasicBlock, [3, 3, 3], use_bn=use_bn, num_classes=num_classes)
+def resnet20(use_bn, dropout, num_classes=10):
+	return ResNet(BasicBlock, [3, 3, 3], use_bn=use_bn, dropout=dropout, num_classes=num_classes)
 
-def resnet32(use_bn, num_classes=10):
-	return ResNet(BasicBlock, [5, 5, 5], use_bn=use_bn, num_classes=num_classes)
+def resnet32(use_bn, dropout, num_classes=10):
+	return ResNet(BasicBlock, [5, 5, 5], use_bn=use_bn, dropout=dropout, num_classes=num_classes)
 
-def resnet44(use_bn, num_classes=10):
-	return ResNet(BasicBlock, [7, 7, 7], use_bn=use_bn, num_classes=num_classes)
+def resnet44(use_bn, dropout, num_classes=10):
+	return ResNet(BasicBlock, [7, 7, 7], use_bn=use_bn, dropout=dropout, num_classes=num_classes)
 
-def resnet56(use_bn, num_classes=10):
-	return ResNet(BasicBlock, [9, 9, 9], use_bn=use_bn, num_classes=num_classes)
+def resnet56(use_bn, dropout, num_classes=10):
+	return ResNet(BasicBlock, [9, 9, 9], use_bn=use_bn, dropout=dropout, num_classes=num_classes)
 
-def resnet110(use_bn, num_classes=10):
-	return ResNet(BasicBlock, [18, 18, 18], use_bn=use_bn, num_classes=num_classes)
+def resnet110(use_bn, dropout, num_classes=10):
+	return ResNet(BasicBlock, [18, 18, 18], use_bn=use_bn, dropout=dropout, num_classes=num_classes)
 
-def resnet1202(use_bn, num_classes=10):
-	return ResNet(BasicBlock, [200, 200, 200], use_bn=use_bn, num_classes=num_classes)
+def resnet1202(use_bn, dropout, num_classes=10):
+	return ResNet(BasicBlock, [200, 200, 200], use_bn=use_bn, dropout=dropout, num_classes=num_classes)
 
 def time_string():
   ISOTIMEFORMAT='%Y-%m-%d %X'
