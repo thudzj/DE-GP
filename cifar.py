@@ -118,7 +118,7 @@ def main():
 	tau = nn.Parameter(torch.tensor(args.tau_init).cuda())
 
 	if args.method == 'our':
-		prior_model = to_prior_nn(eval(args.prior_arch)(args.use_bn), args).cuda()
+		prior_model = to_prior_nn(eval(args.prior_arch)(args.use_bn, args.dropout), args).cuda()
 	else:
 		prior_model = None
 
@@ -126,7 +126,7 @@ def main():
 	# print(prior_model)
 
 	if args.method == 'anc':
-		anchor_models = [model_func(args.use_bn).cuda() for _ in range(args.n_ensemble)]
+		anchor_models = [model_func(args.use_bn, args.dropout).cuda() for _ in range(args.n_ensemble)]
 		for anchor_model in anchor_models:
 			init_NN(anchor_model, args.W_var, args.b_var)
 			for p in anchor_model.parameters():
@@ -316,6 +316,10 @@ def main():
 	mis = np.concatenate([mis, ood_mis])
 	mis /= mis.max()
 	mis = 1 - mis
+
+	from sklearn import metrics
+	tempy = np.concatenate([np.ones((mis.shape[0] - ood_mis.shape[0],)), np.zeros((ood_mis.shape[0],))])
+	print('OOD-AUROC', metrics.average_precision_score(tempy, mis))
 	ths = np.linspace(0, 1, 300)[:299]
 	accs = []
 	for th in ths:

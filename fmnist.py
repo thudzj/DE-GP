@@ -405,6 +405,11 @@ def main():
 	mis = np.concatenate([mis, ood_mis])
 	mis /= mis.max()
 	mis = 1 - mis
+        
+	from sklearn import metrics
+	tempy = np.concatenate([np.ones((mis.shape[0] - ood_mis.shape[0],)), np.zeros((ood_mis.shape[0],))])
+	print('OOD-AUROC', metrics.average_precision_score(tempy, mis))
+
 	ths = np.linspace(0, 1, 300)[:299]
 	accs = []
 	for th in ths:
